@@ -26,6 +26,23 @@ Hermes CRM connects your AI sales agent to a Notion-backed pipeline manager. The
 - **Global Search** - Quick find across prospects, deals, and activities
 - **Voice Dictate** - Speech-to-text input for logging notes and activities
 
+## Screenshots
+
+### Landing Page
+![Landing Page](assets/screenshots/landing.png)
+
+### Dashboard
+![Dashboard](assets/screenshots/dashboard.png)
+
+### Prospects
+![Prospects](assets/screenshots/prospects.png)
+
+### Deals Kanban
+![Deals](assets/screenshots/deals.png)
+
+### AI Agent
+![AI Agent](assets/screenshots/agent.png)
+
 ## Quick Start
 
 ### Prerequisites
