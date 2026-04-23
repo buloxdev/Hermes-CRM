@@ -76,11 +76,19 @@ def _ddgs_search_sync(query: str, limit: int) -> List[dict]:
     return results
 
 async def duckduckgo_search(query: str, limit: int = 5, retries: int = 3) -> List[dict]:
-    """Search using duckduckgo-search library with retries and backoff."""
+    """Search using duckduckgo-search library with retries, backoff, and timeout."""
     for attempt in range(retries):
         try:
-            results = await asyncio.to_thread(_ddgs_search_sync, query, limit)
+            results = await asyncio.wait_for(
+                asyncio.to_thread(_ddgs_search_sync, query, limit),
+                timeout=10.0,
+            )
             return results
+        except asyncio.TimeoutError:
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            return []
         except Exception as e:
             err_str = str(e).lower()
             if "ratelimit" in err_str or "202" in err_str:
@@ -362,11 +370,11 @@ async def chat(request: ChatRequest):
         role = params["role"]
         location = params["location"]
 
-        # Search for prospects
-        prospects, search_error = await search_prospects(role, location)
+        # Search for prospects (DDGS disabled: threads block uvicorn event loop)
+        prospects, search_error = [], "Web search disabled (DDGS blocks event loop)"
 
         if search_error and not prospects:
-            # Web search failed, try LLM fallback for realistic suggestions
+            # Use LLM fallback for realistic suggestions
             llm_prospects = await generate_prospects_via_llm(role, location, params.get("industry"))
 
             if llm_prospects:
