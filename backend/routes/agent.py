@@ -1,4 +1,5 @@
 import os
+import asyncio
 import re
 import json
 import httpx
@@ -61,28 +62,31 @@ async def call_openrouter(messages: list, model: str = "anthropic/claude-sonnet-
         data = resp.json()
         return data["choices"][0]["message"]["content"]
 
+def _ddgs_search_sync(query: str, limit: int) -> List[dict]:
+    """Synchronous DDGS search to run in thread pool."""
+    from duckduckgo_search import DDGS
+    results = []
+    with DDGS() as ddgs:
+        for r in ddgs.text(query, max_results=limit):
+            results.append({
+                "title": r["title"],
+                "url": r["href"],
+                "snippet": r["body"],
+            })
+    return results
+
 async def duckduckgo_search(query: str, limit: int = 5, retries: int = 3) -> List[dict]:
     """Search using duckduckgo-search library with retries and backoff."""
-    from duckduckgo_search import DDGS
-    import time
-
     for attempt in range(retries):
         try:
-            results = []
-            with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=limit):
-                    results.append({
-                        "title": r["title"],
-                        "url": r["href"],
-                        "snippet": r["body"],
-                    })
+            results = await asyncio.to_thread(_ddgs_search_sync, query, limit)
             return results
         except Exception as e:
             err_str = str(e).lower()
             if "ratelimit" in err_str or "202" in err_str:
                 wait = 2 ** attempt
                 if attempt < retries - 1:
-                    time.sleep(wait)
+                    await asyncio.sleep(wait)
                     continue
             return []
     return []
@@ -151,8 +155,7 @@ JSON:"""
 
 async def search_prospects(role: str, location: str) -> tuple[List[dict], str]:
     """Search for prospects using DuckDuckGo with multiple query strategies."""
-    import time
-
+    
     queries = [
         # Try LinkedIn first
         f'site:linkedin.com/in "{role}" "{location}"',
@@ -170,7 +173,7 @@ async def search_prospects(role: str, location: str) -> tuple[List[dict], str]:
     for i, query in enumerate(queries):
         # Stagger searches to avoid rate limits
         if i > 0:
-            time.sleep(1.5)
+            await asyncio.sleep(1.5)
 
         try:
             results = await duckduckgo_search(query, limit=6)
@@ -217,7 +220,7 @@ async def search_prospects(role: str, location: str) -> tuple[List[dict], str]:
 
             # Fallback: targeted search for company if still unknown
             if not parsed["company"] or parsed["company"] == "Unknown":
-                time.sleep(1)
+                await asyncio.sleep(1)
                 parsed["company"] = await _search_company_for_prospect(parsed["name"], parsed["title"])
 
             prospects.append({
