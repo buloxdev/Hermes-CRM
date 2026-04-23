@@ -249,13 +249,15 @@ async def generate_prospects_via_llm(role: str, location: str, industry: Optiona
 Return ONLY a JSON array of objects with these exact fields:
 - "name": Full name (use realistic names)
 - "title": Exact job title
-- "company": Company name (use real, well-known companies with operations in {location})
+- "company": Company name (use real companies with operations in {location})
 - "notes": One sentence about why this is a good prospect
 
 Requirements:
 - Use REAL company names that operate in {location}
 - Use realistic but fictional person names
-- Focus on large companies ($100M+ revenue)
+- Target mid-market to large private companies ($100M-$5B revenue), NOT Fortune 50 megacorps
+- Avoid these companies: McDonald's, Walmart, Amazon, Target, Costco, Boeing, Walgreens, Abbott, Caterpillar, Kraft Heinz, Ford, GM, Apple, Google, Microsoft, Coca-Cola, PepsiCo, Nike, UPS, FedEx, J.B. Hunt, C.H. Robinson, Amazon, Kroger, Albertsons, Publix
+- Focus on regional distributors, manufacturers, private CPG brands, logistics companies, food producers, and industrial suppliers
 - Return ONLY valid JSON, no markdown, no explanations
 
 JSON array:"""
@@ -338,9 +340,29 @@ Company:"""
     return "Unknown"
 
 async def save_prospects_to_notion(prospects: List[dict]) -> int:
-    """Save prospects to Notion database."""
+    """Save prospects to Notion database, skipping duplicates by company + contact name."""
+    # Fetch existing prospects for deduplication
+    existing_set = set()
+    try:
+        existing_pages = await query_database(PROSPECTS_DB_ID)
+        for page in existing_pages:
+            props = page.get("properties", {})
+            company = ""
+            contact = ""
+            if props.get("Company", {}).get("title"):
+                company = props["Company"]["title"][0].get("plain_text", "")
+            if props.get("Contact Name", {}).get("rich_text"):
+                contact = props["Contact Name"]["rich_text"][0].get("plain_text", "")
+            if company and contact:
+                existing_set.add(f"{company.lower().strip()}|{contact.lower().strip()}")
+    except Exception:
+        pass
+
     saved = 0
     for p in prospects:
+        key = f"{p['company'].lower().strip()}|{p['name'].lower().strip()}"
+        if key in existing_set:
+            continue
         try:
             await create_page(
                 PROSPECTS_DB_ID,
@@ -354,6 +376,7 @@ async def save_prospects_to_notion(prospects: List[dict]) -> int:
                     "Website": {"url": p["url"] if p["url"].startswith("http") else None},
                 }
             )
+            existing_set.add(key)
             saved += 1
         except Exception:
             continue
