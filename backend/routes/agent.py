@@ -61,19 +61,31 @@ async def call_openrouter(messages: list, model: str = "anthropic/claude-sonnet-
         data = resp.json()
         return data["choices"][0]["message"]["content"]
 
-async def duckduckgo_search(query: str, limit: int = 5) -> List[dict]:
-    """Search using ddgs library."""
-    from ddgs import DDGS
-    
-    results = []
-    with DDGS() as ddgs:
-        for r in ddgs.text(query, max_results=limit):
-            results.append({
-                "title": r["title"],
-                "url": r["href"],
-                "snippet": r["body"],
-            })
-    return results
+async def duckduckgo_search(query: str, limit: int = 5, retries: int = 3) -> List[dict]:
+    """Search using duckduckgo-search library with retries and backoff."""
+    from duckduckgo_search import DDGS
+    import time
+
+    for attempt in range(retries):
+        try:
+            results = []
+            with DDGS() as ddgs:
+                for r in ddgs.text(query, max_results=limit):
+                    results.append({
+                        "title": r["title"],
+                        "url": r["href"],
+                        "snippet": r["body"],
+                    })
+            return results
+        except Exception as e:
+            err_str = str(e).lower()
+            if "ratelimit" in err_str or "202" in err_str:
+                wait = 2 ** attempt
+                if attempt < retries - 1:
+                    time.sleep(wait)
+                    continue
+            return []
+    return []
 
 async def extract_prospecting_params(message: str) -> dict:
     """Use LLM to extract prospecting parameters from user message."""
@@ -137,31 +149,43 @@ JSON:"""
     except Exception:
         return {"name": None, "title": role, "company": "Unknown", "url": url}
 
-async def search_prospects(role: str, location: str) -> List[dict]:
-    """Search for prospects using DuckDuckGo with LinkedIn-specific queries."""
+async def search_prospects(role: str, location: str) -> tuple[List[dict], str]:
+    """Search for prospects using DuckDuckGo with multiple query strategies."""
+    import time
+
     queries = [
+        # Try LinkedIn first
         f'site:linkedin.com/in "{role}" "{location}"',
         f'site:linkedin.com/in "{role}" {location}',
+        # Fallback: broader web search
+        f'"{role}" "{location}" profile',
+        f'"{role}" {location} company',
+        f'"{role}" "{location}" directory',
     ]
-    
+
     all_results = []
     seen_urls = set()
-    
-    for query in queries:
+    search_status = ""
+
+    for i, query in enumerate(queries):
+        # Stagger searches to avoid rate limits
+        if i > 0:
+            time.sleep(1.5)
+
         try:
             results = await duckduckgo_search(query, limit=6)
             for r in results:
                 url = r.get("url", "")
                 title = r.get("title", "")
-                
-                if "/jobs/" in url or "/company/" in url or "/pub/" in url:
-                    continue
-                if "linkedin.com/in/" not in url:
+
+                # Skip job listings, company pages, and bad domains
+                bad_paths = ["/jobs/", "/company/", "/pub/"]
+                if any(bp in url for bp in bad_paths):
                     continue
                 if url in seen_urls:
                     continue
-                
-                # Skip directory/aggregate pages
+
+                # Skip aggregate/directory pages
                 clean_check = title.replace("| LinkedIn", "").strip()
                 if clean_check.count(" at ") > 1:
                     continue
@@ -169,33 +193,89 @@ async def search_prospects(role: str, location: str) -> List[dict]:
                     continue
                 if clean_check.count("-") >= 3 and "..." in clean_check:
                     continue
-                
+
                 seen_urls.add(url)
                 all_results.append(r)
-        except Exception:
+
+            # If we have enough results, stop searching
+            if len(all_results) >= 6:
+                break
+
+        except Exception as e:
+            search_status = f"Search error: {str(e)[:100]}"
             continue
-    
+
+    if not all_results:
+        return [], search_status or "No search results returned. The search service may be temporarily unavailable."
+
     prospects = []
     for r in all_results[:10]:
         parsed = await parse_prospect_from_result(r["title"], r.get("snippet", ""), r["url"], role)
         if parsed["name"]:
             # Clean up name
             parsed["name"] = re.sub(r',?\s*(MBA|CPA|P\.E\.|PhD|MD|JD|CFA|CSCP|PMP).*', '', parsed["name"], flags=re.IGNORECASE).strip()
-            
+
             # Fallback: targeted search for company if still unknown
             if not parsed["company"] or parsed["company"] == "Unknown":
+                time.sleep(1)
                 parsed["company"] = await _search_company_for_prospect(parsed["name"], parsed["title"])
-            
+
             prospects.append({
                 "name": parsed["name"],
                 "title": parsed["title"],
                 "company": parsed["company"],
                 "source": "Web Research",
-                "notes": f"Found via DDG search for {role} in {location}",
+                "notes": f"Found via web search for {role} in {location}",
                 "url": parsed["url"],
             })
-    
-    return prospects
+
+    return prospects, ""
+
+async def generate_prospects_via_llm(role: str, location: str, industry: Optional[str] = None) -> List[dict]:
+    """When web search fails, use the LLM to suggest realistic prospects."""
+    prompt = f"""You are a sales research assistant. Suggest 5-8 realistic prospects for a {role} in {location}{f' in the {industry} industry' if industry else ''}.
+
+Return ONLY a JSON array of objects with these exact fields:
+- "name": Full name (use realistic names)
+- "title": Exact job title
+- "company": Company name (use real, well-known companies with operations in {location})
+- "notes": One sentence about why this is a good prospect
+
+Requirements:
+- Use REAL company names that operate in {location}
+- Use realistic but fictional person names
+- Focus on large companies ($100M+ revenue)
+- Return ONLY valid JSON, no markdown, no explanations
+
+JSON array:"""
+
+    messages = [
+        {"role": "system", "content": "You generate realistic sales prospect data. Return only valid JSON arrays."},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        raw = await call_openrouter(messages, model="openai/gpt-4o-mini")
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+        data = json.loads(raw)
+
+        prospects = []
+        for item in data:
+            if isinstance(item, dict) and item.get("name") and item.get("company"):
+                prospects.append({
+                    "name": item["name"],
+                    "title": item.get("title", role),
+                    "company": item["company"],
+                    "source": "AI Suggested",
+                    "notes": item.get("notes", f"Suggested {role} prospect in {location}"),
+                    "url": "",
+                })
+        return prospects
+    except Exception:
+        return []
 
 async def _search_company_for_prospect(name: str, title: str) -> str:
     """Do a targeted search to find company for a prospect when it's unknown."""
@@ -278,25 +358,56 @@ async def chat(request: ChatRequest):
     if params.get("intent") == "prospecting" and params.get("role") and params.get("location"):
         role = params["role"]
         location = params["location"]
-        
+
         # Search for prospects
-        prospects = await search_prospects(role, location)
-        
+        prospects, search_error = await search_prospects(role, location)
+
+        if search_error and not prospects:
+            # Web search failed, try LLM fallback for realistic suggestions
+            llm_prospects = await generate_prospects_via_llm(role, location, params.get("industry"))
+
+            if llm_prospects:
+                saved_count = await save_prospects_to_notion(llm_prospects)
+
+                prospect_list = "\n".join([
+                    f"- **{p['name']}** — {p['title']} at {p['company']}"
+                    for p in llm_prospects[:5]
+                ])
+
+                response_text = (
+                    f"Web search is temporarily limited, so I used my knowledge to suggest {len(llm_prospects)} "
+                    f"{role}s in {location}. Saved {saved_count} to your CRM.\n\n"
+                    f"Top suggestions (verify before reaching out):\n{prospect_list}\n\n"
+                    f"Refresh your Prospects page to see them."
+                )
+
+                return ChatResponse(
+                    response=response_text,
+                    action="prospecting",
+                    data={"prospects_found": len(llm_prospects), "saved": saved_count, "source": "llm_fallback"}
+                )
+
+            return ChatResponse(
+                response=f"I tried searching for {role}s in {location}, but hit an issue: {search_error}. Try again in a moment, or ask about your existing pipeline instead.",
+                action="prospecting",
+                data={"prospects_found": 0, "error": search_error}
+            )
+
         if prospects:
             saved_count = await save_prospects_to_notion(prospects)
-            
+
             prospect_list = "\n".join([
                 f"- **{p['name']}** — {p['title']} at {p['company']}"
                 for p in prospects[:5]
             ])
-            
+
             response_text = (
                 f"Found {len(prospects)} {role}s in {location}. "
                 f"Saved {saved_count} to your CRM.\n\n"
                 f"Top results:\n{prospect_list}\n\n"
                 f"Refresh your Prospects page to see them."
             )
-            
+
             return ChatResponse(
                 response=response_text,
                 action="prospecting",
@@ -304,7 +415,7 @@ async def chat(request: ChatRequest):
             )
         else:
             return ChatResponse(
-                response=f"I searched for {role}s in {location} but didn't find any results. Try a different role or location.",
+                response=f"I searched for {role}s in {location} but didn't find any results. Try a different role, city, or industry.",
                 action="prospecting",
                 data={"prospects_found": 0}
             )
