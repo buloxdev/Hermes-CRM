@@ -247,14 +247,14 @@ async def generate_prospects_via_llm(role: str, location: str, industry: Optiona
     prompt = f"""You are a sales research assistant. Suggest 5-8 realistic prospects for a {role} in {location}{f' in the {industry} industry' if industry else ''}.
 
 Return ONLY a JSON array of objects with these exact fields:
-- "name": Full name (use realistic names)
+- "name": Full name (use real, publicly known names ONLY; if unknown, use "Unknown - verify via LinkedIn")
 - "title": Exact job title
 - "company": Company name (use real companies with operations in {location})
 - "notes": One sentence about why this is a good prospect
 
 Requirements:
 - Use REAL company names that operate in {location}
-- Use realistic but fictional person names
+- Use REAL person names ONLY if you are confident they hold this role at this company; otherwise use "Unknown - verify via LinkedIn"
 - Target mid-market to large private companies ($100M-$5B revenue), NOT Fortune 50 megacorps
 - Avoid these companies: McDonald's, Walmart, Amazon, Target, Costco, Boeing, Walgreens, Abbott, Caterpillar, Kraft Heinz, Ford, GM, Apple, Google, Microsoft, Coca-Cola, PepsiCo, Nike, UPS, FedEx, J.B. Hunt, C.H. Robinson, Amazon, Kroger, Albertsons, Publix
 - Focus on regional distributors, manufacturers, private CPG brands, logistics companies, food producers, and industrial suppliers
@@ -340,9 +340,10 @@ Company:"""
     return "Unknown"
 
 async def save_prospects_to_notion(prospects: List[dict]) -> int:
-    """Save prospects to Notion database, skipping duplicates by company + contact name."""
+    """Save prospects to Notion database, skipping duplicates by company + contact name, and by company alone."""
     # Fetch existing prospects for deduplication
-    existing_set = set()
+    existing_set = set()      # company|contact
+    existing_companies = set()  # company only
     try:
         existing_pages = await query_database(PROSPECTS_DB_ID)
         for page in existing_pages:
@@ -353,14 +354,22 @@ async def save_prospects_to_notion(prospects: List[dict]) -> int:
                 company = props["Company"]["title"][0].get("plain_text", "")
             if props.get("Contact Name", {}).get("rich_text"):
                 contact = props["Contact Name"]["rich_text"][0].get("plain_text", "")
-            if company and contact:
-                existing_set.add(f"{company.lower().strip()}|{contact.lower().strip()}")
+            if company:
+                existing_companies.add(company.lower().strip())
+                if contact:
+                    existing_set.add(f"{company.lower().strip()}|{contact.lower().strip()}")
     except Exception:
         pass
 
     saved = 0
     for p in prospects:
-        key = f"{p['company'].lower().strip()}|{p['name'].lower().strip()}"
+        company_norm = p['company'].lower().strip()
+        name_norm = p['name'].lower().strip()
+        # Skip if this company already exists (regardless of contact)
+        if company_norm in existing_companies:
+            continue
+        # Skip if exact company+contact already exists
+        key = f"{company_norm}|{name_norm}"
         if key in existing_set:
             continue
         try:
@@ -377,6 +386,7 @@ async def save_prospects_to_notion(prospects: List[dict]) -> int:
                 }
             )
             existing_set.add(key)
+            existing_companies.add(company_norm)
             saved += 1
         except Exception:
             continue
