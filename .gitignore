@@ -1,0 +1,6 @@
+.next/
+node_modules/
+backend/.venv/
+__pycache__/
+tsbuildinfo
+frontend/tsconfig.tsbuildinfo
