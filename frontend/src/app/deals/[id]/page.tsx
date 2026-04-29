@@ -131,9 +131,9 @@ export default function DealDetailPage() {
       await createActivity({
         activity: logActivity.trim(),
         type: logType,
-        date: logDate || null,
-        notes: logNotes.trim() || null,
-        outcome: logOutcome || null,
+        date: logDate || undefined,
+        notes: logNotes.trim() || undefined,
+        outcome: logOutcome || undefined,
         deal_id: id,
         prospect_id: deal?.prospect?.id || null,
       });

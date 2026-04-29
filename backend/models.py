@@ -221,6 +221,31 @@ class UpcomingClose(BaseModel):
     prospect_name: Optional[str] = None
 
 
+class TopAccount(BaseModel):
+    id: str
+    company: str
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
+    status: Optional[str] = None
+    score: int
+    priority: str
+    reason: str
+    next_action: Optional[str] = None
+    next_action_type: Optional[str] = None
+    deal_value: Optional[float] = None
+    active_deal_value: Optional[float] = None
+
+
+class DailyBriefItem(BaseModel):
+    id: str
+    type: str
+    title: str
+    subtitle: str
+    count: int
+    priority: str
+    href: str
+
+
 class DashboardResponse(BaseModel):
     total_prospects: int
     prospects_by_status: dict
@@ -231,6 +256,8 @@ class DashboardResponse(BaseModel):
     recent_activities: List[Activity]
     upcoming_actions: List[Prospect]
     upcoming_closes: List[UpcomingClose]
+    top_accounts: List[TopAccount] = []
+    daily_brief: List[DailyBriefItem] = []
     total_deal_value_by_stage: Optional[dict] = None
     deals_in_pipeline: Optional[int] = None
     deal_counts_by_stage: Optional[dict] = None

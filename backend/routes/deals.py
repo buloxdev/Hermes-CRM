@@ -123,6 +123,8 @@ async def create_deal(data: DealCreate):
             except Exception:
                 pass
 
+        from routes.dashboard import clear_dashboard_cache
+        clear_dashboard_cache()
         return Deal(**d)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -142,6 +144,8 @@ async def update_deal(page_id: str, data: DealUpdate):
             except Exception:
                 pass
 
+        from routes.dashboard import clear_dashboard_cache
+        clear_dashboard_cache()
         return Deal(**d)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

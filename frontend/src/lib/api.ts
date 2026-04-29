@@ -34,6 +34,7 @@ export interface Deal {
   competitors: string;
   notes: string;
   prospect_id: string | null;
+  prospect_name?: string;
   prospect_company?: string;
   created_at: string;
 }
@@ -46,6 +47,7 @@ export interface Activity {
   notes: string;
   outcome: string;
   prospect_id: string | null;
+  prospect_name?: string;
   prospect_company?: string;
   deal_id: string | null;
   deal_name?: string;
@@ -61,16 +63,44 @@ export interface UpcomingClose {
   prospect_name: string | null;
 }
 
+export interface TopAccount {
+  id: string;
+  company: string;
+  contact_name: string | null;
+  contact_title: string | null;
+  status: string | null;
+  score: number;
+  priority: string;
+  reason: string;
+  next_action: string | null;
+  next_action_type: string | null;
+  deal_value: number | null;
+  active_deal_value: number | null;
+}
+
+export interface DailyBriefItem {
+  id: string;
+  type: string;
+  title: string;
+  subtitle: string;
+  count: number;
+  priority: string;
+  href: string;
+}
+
 export interface DashboardData {
   total_prospects: number;
   prospects_by_status: Record<string, number>;
   total_pipeline_value: number;
+  total_deals: number;
   deals_in_pipeline: number;
   meetings_set: number;
   emails_sent: number;
   recent_activities: Activity[];
   upcoming_actions: Prospect[];
   upcoming_closes: UpcomingClose[];
+  top_accounts: TopAccount[];
+  daily_brief: DailyBriefItem[];
   total_deal_value_by_stage: Record<string, number>;
   deal_counts_by_stage?: Record<string, number>;
 }

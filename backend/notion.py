@@ -1,4 +1,6 @@
 import httpx
+import re
+import string
 from typing import Optional, Any
 from config import NOTION_API_KEY, NOTION_API_VERSION, NOTION_BASE_URL
 
@@ -176,6 +178,9 @@ async def update_page(page_id: str, properties: dict) -> dict:
 
 def page_to_prospect(page: dict) -> dict:
     props = page["properties"]
+    source = get_select(props, "Source")
+    if source not in ("Manual", "Web Research", "Referral", "Event"):
+        source = "Web Research" if source else None
     return {
         "id": page["id"],
         "company": get_title(props, "Company") or "",
@@ -188,7 +193,7 @@ def page_to_prospect(page: dict) -> dict:
         "industry": get_select(props, "Industry"),
         "revenue": get_select(props, "Revenue"),
         "employee_count": get_select(props, "Employee Count"),
-        "source": get_select(props, "Source"),
+        "source": source,
         "key_decision_makers": get_rich_text(props, "Key Decision Makers"),
         "research_notes": get_rich_text(props, "Research Notes"),
         "draft_email": get_rich_text(props, "Draft Email"),
@@ -399,3 +404,35 @@ def activity_update_props(data) -> dict:
     if data.deal_id is not None:
         props["Deal"] = relation_prop([data.deal_id])
     return props
+
+def normalize_company_name(name: str) -> str:
+    """Normalize company name for duplicate detection (lowercase, strip punctuation, drop suffixes)."""
+    if not name:
+        return ""
+    norm = name.lower().strip()
+    # Remove trailing punctuation/spacing
+    norm = norm.strip(string.punctuation + " ")
+    # Remove common business suffixes
+    suffixes = [
+        "inc", "llc", "co", "corp", "corporation", "company", "ltd", "limited",
+        "plc", "gmbh", "sa", "sarl", "holding", "holdings", "group",
+    ]
+    for suffix in suffixes:
+        pattern = rf"\b{re.escape(suffix)}\b[\s\.,;]*$"
+        norm = re.sub(pattern, "", norm).strip()
+    # Strip any leftover punctuation after suffix removal
+    norm = norm.strip(string.punctuation + " ")
+    # Collapse whitespace
+    norm = re.sub(r"\s+", " ", norm)
+    return norm.strip()
+
+
+def normalize_contact_name(name: str) -> str:
+    """Normalize contact name for duplicate detection (lowercase, strip punctuation)."""
+    if not name:
+        return ""
+    norm = name.lower().strip()
+    norm = norm.translate(str.maketrans("", "", string.punctuation))
+    norm = re.sub(r"\s+", " ", norm)
+    return norm.strip()
+

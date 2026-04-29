@@ -4,12 +4,15 @@ import { useEffect, useState, useCallback } from 'react';
 import { getProspects, updateProspect, createProspect, Prospect } from '@/lib/api';
 import ProspectTable from '@/components/ProspectTable';
 import FilterBar from '@/components/FilterBar';
-import { Plus, Loader2, AlertCircle, X } from 'lucide-react';
+import { Plus, Loader2, AlertCircle, X, Save, RotateCcw } from 'lucide-react';
 
 export default function ProspectsPage() {
   const [prospects, setProspects] = useState<Prospect[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pendingStatusChanges, setPendingStatusChanges] = useState<Record<string, string>>({});
+  const [savedStatuses, setSavedStatuses] = useState<Record<string, string>>({});
+  const [savingStatuses, setSavingStatuses] = useState(false);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState('');
@@ -41,6 +44,8 @@ export default function ProspectsPage() {
         search: searchQuery || undefined,
       });
       setProspects(data);
+      setSavedStatuses(Object.fromEntries(data.map((p) => [p.id, p.status])));
+      setPendingStatusChanges({});
       setError(null);
     } catch (err: any) {
       setError(err.message || 'Failed to load prospects');
@@ -53,13 +58,38 @@ export default function ProspectsPage() {
     loadProspects();
   }, [loadProspects]);
 
-  const handleStatusChange = async (id: string, status: string) => {
+  const handleStatusChange = (id: string, status: string) => {
+    const original = savedStatuses[id];
+    setPendingStatusChanges((prev) => {
+      const next = { ...prev };
+      if (status === original) {
+        delete next[id];
+      } else {
+        next[id] = status;
+      }
+      return next;
+    });
+    setProspects((prev) => prev.map((p) => (p.id === id ? { ...p, status } : p)));
+  };
+
+  const handleSaveStatusChanges = async () => {
+    const entries = Object.entries(pendingStatusChanges);
+    if (!entries.length || savingStatuses) return;
+    setSavingStatuses(true);
     try {
-      await updateProspect(id, { status });
-      loadProspects();
-    } catch (err) {
+      await Promise.all(entries.map(([id, status]) => updateProspect(id, { status })));
+      await loadProspects();
+    } catch (err: any) {
       console.error('Failed to update status:', err);
+      setError(err.message || 'Failed to save status changes');
+    } finally {
+      setSavingStatuses(false);
     }
+  };
+
+  const handleDiscardStatusChanges = () => {
+    setPendingStatusChanges({});
+    loadProspects();
   };
 
   const handleCreateProspect = async (e: React.FormEvent) => {
@@ -111,6 +141,34 @@ export default function ProspectsPage() {
         onSearchChange={setSearchQuery}
       />
 
+      {Object.keys(pendingStatusChanges).length > 0 && (
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border border-amber-400/30 bg-amber-500/10 px-4 py-3 rounded-lg">
+          <p className="text-sm text-amber-100">
+            {Object.keys(pendingStatusChanges).length} unsaved status change{Object.keys(pendingStatusChanges).length !== 1 ? 's' : ''}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleDiscardStatusChanges}
+              disabled={savingStatuses}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-slate-700 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Discard
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveStatusChanges}
+              disabled={savingStatuses}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-md bg-teal-500 hover:bg-teal-400 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {savingStatuses ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              Save changes
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       {loading ? (
         <div className="flex items-center justify-center py-12">
@@ -122,7 +180,11 @@ export default function ProspectsPage() {
           <p className="text-sm text-slate-400">{error}</p>
         </div>
       ) : (
-        <ProspectTable prospects={prospects} onStatusChange={handleStatusChange} />
+        <ProspectTable
+          prospects={prospects}
+          onStatusChange={handleStatusChange}
+          pendingStatusChanges={pendingStatusChanges}
+        />
       )}
 
       {/* New Prospect Modal */}

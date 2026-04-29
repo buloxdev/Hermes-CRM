@@ -1,11 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { getDashboard, DashboardData, Prospect, UpcomingClose } from '@/lib/api';
 import StatCard from '@/components/StatCard';
 import PipelineFunnel from '@/components/PipelineFunnel';
 import PipelineValueByStage from '@/components/PipelineValueByStage';
 import RecentActivity from '@/components/RecentActivity';
+import DailySalesBrief from '@/components/DailySalesBrief';
+import TopAccountsToday from '@/components/TopAccountsToday';
 import StatusBadge from '@/components/StatusBadge';
 import { formatCurrency } from '@/lib/utils';
 import Link from 'next/link';
@@ -14,12 +16,13 @@ import {
   Briefcase,
   CalendarCheck,
   Mail,
-  DollarSign,
   Clock,
   ArrowRight,
   Loader2,
   AlertCircle,
   Target,
+  Trophy,
+  TrendingUp,
 } from 'lucide-react';
 
 export default function DashboardPage() {
@@ -27,19 +30,21 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const d = await getDashboard();
-        setData(d);
-      } catch (err: any) {
-        setError(err.message || 'Failed to load dashboard');
-      } finally {
-        setLoading(false);
-      }
+  const loadDashboard = useCallback(async () => {
+    try {
+      setError(null);
+      const d = await getDashboard();
+      setData(d);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load dashboard');
+    } finally {
+      setLoading(false);
     }
-    load();
   }, []);
+
+  useEffect(() => {
+    loadDashboard();
+  }, [loadDashboard]);
 
   if (loading) {
     return (
@@ -60,8 +65,24 @@ export default function DashboardPage() {
     );
   }
 
+  const stageCounts = data.deal_counts_by_stage || {};
+  const valueByStage = data.total_deal_value_by_stage || {};
+  const closedWon = stageCounts['Closed Won'] || 0;
+  const closedLost = stageCounts['Closed Lost'] || 0;
+  const closedDeals = closedWon + closedLost;
+  const winRate = closedDeals > 0 ? Math.round((closedWon / closedDeals) * 100) : 0;
+  const activeDealCount = Object.entries(stageCounts).reduce((sum, [stage, count]) => {
+    if (stage === 'Closed Won' || stage === 'Closed Lost') return sum;
+    return sum + count;
+  }, 0);
+  const activeDealValue = Object.entries(valueByStage).reduce((sum, [stage, value]) => {
+    if (stage === 'Closed Won' || stage === 'Closed Lost') return sum;
+    return sum + value;
+  }, 0);
+  const averageActiveDealSize = activeDealCount > 0 ? activeDealValue / activeDealCount : 0;
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 animate-fade-in">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-white">Dashboard</h1>
@@ -69,7 +90,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6 gap-4">
         <StatCard
           title="Total Prospects"
           value={data.total_prospects}
@@ -79,7 +100,23 @@ export default function DashboardPage() {
         <StatCard
           title="Pipeline Value"
           value={formatCurrency(data.total_pipeline_value || 0)}
+          subtitle={`${activeDealCount} active deals`}
+          icon={Briefcase}
           accent="blue"
+        />
+        <StatCard
+          title="Avg Deal Size"
+          value={formatCurrency(averageActiveDealSize || 0)}
+          subtitle="Active pipeline"
+          icon={TrendingUp}
+          accent="orange"
+        />
+        <StatCard
+          title="Win Rate"
+          value={`${winRate}%`}
+          subtitle={closedDeals > 0 ? `${closedWon}/${closedDeals} closed` : 'No closed deals yet'}
+          icon={Trophy}
+          accent="green"
         />
         <StatCard
           title="Meetings Set"
@@ -95,9 +132,15 @@ export default function DashboardPage() {
         />
       </div>
 
+      {/* Daily Brief */}
+      <DailySalesBrief items={data.daily_brief || []} onActionComplete={loadDashboard} />
+
+      {/* Top Accounts */}
+      <TopAccountsToday accounts={data.top_accounts || []} />
+
       {/* Main Content: Funnel + Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <PipelineFunnel data={data.prospects_by_status} />
+        <PipelineFunnel data={data.deal_counts_by_stage || {}} />
         <RecentActivity activities={data.recent_activities} />
       </div>
 

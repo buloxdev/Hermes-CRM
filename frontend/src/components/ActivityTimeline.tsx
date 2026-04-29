@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useState } from 'react';
 import { Activity, updateActivity, deleteActivity } from '@/lib/api';
 import { useToast } from '@/components/ToastProvider';
@@ -120,7 +121,7 @@ export default function ActivityTimeline({ activities, allowEdit = false, onChan
         const colorClass = typeColors[activity.type] || typeColors.Other;
 
         return (
-          <div key={activity.id} className="flex gap-4 group">
+          <div key={activity.id} className="flex gap-4 group animate-slide-up" style={{ animationDelay: `${Math.min(idx * 35, 280)}ms` }}>
             {/* Timeline line */}
             <div className="flex flex-col items-center">
               <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${colorClass}`}>
@@ -213,9 +214,25 @@ export default function ActivityTimeline({ activities, allowEdit = false, onChan
                       </div>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 mt-0.5">
+                  <div className="flex flex-wrap items-center gap-2 mt-0.5">
                     <span className="text-xs text-slate-400">{activity.type}</span>
                     <span className="text-xs text-slate-500">{formatDate(activity.date)}</span>
+                    {activity.deal_id && activity.deal_name && (
+                      <Link
+                        href={`/deals/${activity.deal_id}`}
+                        className="text-xs text-teal-400 hover:text-teal-300"
+                      >
+                        {activity.deal_name}
+                      </Link>
+                    )}
+                    {activity.prospect_id && (activity.prospect_name || activity.prospect_company) && (
+                      <Link
+                        href={`/prospects/${activity.prospect_id}`}
+                        className="text-xs text-teal-400 hover:text-teal-300"
+                      >
+                        {activity.prospect_name || activity.prospect_company}
+                      </Link>
+                    )}
                   </div>
                   {activity.notes && (
                     <p className="text-sm text-slate-400 mt-1">{activity.notes}</p>

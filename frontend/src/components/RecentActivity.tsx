@@ -173,12 +173,12 @@ function ActivityRow({ activity, highlighted = false }: { activity: Activity; hi
               {activity.deal_name}
             </Link>
           )}
-          {activity.prospect_company && !activity.deal_name && (
+          {(activity.prospect_name || activity.prospect_company) && !activity.deal_name && (
             <Link
               href={`/prospects/${activity.prospect_id}`}
               className="text-xs text-teal-400 hover:text-teal-300 truncate"
             >
-              {activity.prospect_company}
+              {activity.prospect_name || activity.prospect_company}
             </Link>
           )}
           <span className="text-xs text-slate-500 flex-shrink-0">{formatDate(activity.date)}</span>

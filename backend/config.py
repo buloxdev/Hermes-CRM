@@ -9,6 +9,9 @@ load_dotenv(dotenv_path=env_path)
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_API_VERSION = "2022-06-28"
 NOTION_BASE_URL = "https://api.notion.com/v1"
+# Brave Search API
+BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "")
+
 
 # Database IDs
 PROSPECTS_DB_ID = "343127b3-67ba-811a-9640-fe0ccbb652d1"

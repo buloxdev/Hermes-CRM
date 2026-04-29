@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Users, Briefcase, Zap, MessageSquare } from 'lucide-react';
+import { Activity, LayoutDashboard, Users, Briefcase, Zap, MessageSquare } from 'lucide-react';
 import GlobalSearch from './GlobalSearch';
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/prospects', label: 'Prospects', icon: Users },
   { href: '/deals', label: 'Deals', icon: Briefcase },
+  { href: '/activities', label: 'Activities', icon: Activity },
   { href: '/agent', label: 'AI Agent', icon: MessageSquare },
 ];
 

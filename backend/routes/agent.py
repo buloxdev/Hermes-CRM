@@ -6,8 +6,8 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
-from notion import create_page, query_database
-from config import PROSPECTS_DB_ID
+from notion import create_page, query_database, normalize_company_name, normalize_contact_name
+from config import PROSPECTS_DB_ID, BRAVE_SEARCH_API_KEY
 
 router = APIRouter(prefix="/api", tags=["agent"])
 
@@ -19,7 +19,8 @@ class ChatMessage(BaseModel):
     content: str
 
 class ChatRequest(BaseModel):
-    messages: List[ChatMessage]
+    messages: Optional[List[ChatMessage]] = None
+    message: Optional[str] = None
 
 class ChatResponse(BaseModel):
     response: str
@@ -28,15 +29,18 @@ class ChatResponse(BaseModel):
 
 SYSTEM_PROMPT = """You are Mike, an AI sales assistant embedded in a CRM app. You help with:
 1. Prospecting - finding leads by role, location, industry
-2. CRM questions - answering questions about prospects, deals, pipeline
-3. Sales strategy - giving advice on outreach, follow-ups, closing
+2. CRM queries - pulling deal/activity data
+3. Notion management - creating/updating pages
 
-When the user asks for prospects, extract:
-- role/title (e.g., "VP of Logistics", "Supply Chain Director")
-- location/city (e.g., "Dallas", "Chicago", "Atlanta")
-- industry (optional, default to logistics/supply chain)
+You have access to:
+- Brave Search for fresh web results (primary)
+- Notion API for CRM data
+- Real-time company research
 
-Respond conversationally. Be concise and direct. If you need more info, ask."""
+When prospecting, use Brave Search first. If results are sparse, supplement with your knowledge.
+Never invent personal details (emails, phones). Only suggest: name, title, company, LinkedIn hint.
+Always flag Food & Beverage / Frozen / Refrigerated companies as "verify via LinkedIn".
+If you need more info, ask."""
 
 async def call_openrouter(messages: list, model: str = "anthropic/claude-sonnet-4") -> str:
     if not OPENROUTER_API_KEY:
@@ -100,48 +104,79 @@ async def duckduckgo_search(query: str, limit: int = 5, retries: int = 3) -> Lis
     return []
 
 async def extract_prospecting_params(message: str) -> dict:
-    """Use LLM to extract prospecting parameters from user message."""
-    prompt = f"""Extract prospecting parameters from this user message. Return ONLY a JSON object with these fields:
-- "intent": "prospecting" or "other"
-- "role": the job title/role they want (e.g., "VP of Logistics", "Supply Chain Director")
-- "location": the city or region (e.g., "Dallas", "Chicago")
-- "industry": the industry if specified, otherwise null
-- "query": a good search query to find these people
+    """Extract prospecting parameters from user message."""
+    class Params(BaseModel):
+        intent: str = "other"
+        role: str
+        location: str = ""
+        industry: Optional[str] = None
+        count: int = 2
 
-User message: "{message}"
+    prompt = f"""Classify this sales CRM chat request and extract prospecting parameters when relevant.
+Return JSON with exactly these keys: intent, role, location, industry, count.
+
+Rules:
+- intent must be "prospecting" if the user asks to find, search for, source, or add leads/prospects.
+- intent must be "other" for general chat, CRM questions, or unclear requests.
+- role should be the requested buyer/contact role, or an empty string.
+- location should be a city, state, region, or empty string.
+- industry should be a string or null.
+- count should be an integer, default 2.
+
+Request: "{message}"
 
 JSON:"""
 
-    messages = [
-        {"role": "system", "content": "You are a parameter extraction assistant. Return only valid JSON."},
-        {"role": "user", "content": prompt},
-    ]
-    
     try:
-        raw = await call_openrouter(messages, model="openai/gpt-4o-mini")
-        # Clean up markdown code blocks
+        raw = await call_openrouter([{
+            "role": "user",
+            "content": prompt
+        }], model="openai/gpt-4o-mini")
         raw = raw.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw)
-        return json.loads(raw)
+        data = json.loads(raw)
+        return {
+            "intent": data.get("intent", "other"),
+            "role": data.get("role", ""),
+            "location": data.get("location", ""),
+            "industry": data.get("industry"),
+            "count": int(data.get("count", 2)) if isinstance(data.get("count"), (int, float, str)) else 2,
+            "query": message,
+        }
     except Exception:
-        return {"intent": "other", "role": None, "location": None, "industry": None, "query": None}
+        return {"intent": "other", "role": "", "location": "", "industry": None, "count": 2, "query": message}
 
-async def parse_prospect_from_result(title: str, snippet: str, url: str, role: str) -> dict:
-    """Use LLM to extract name, title, company from a search result."""
-    prompt = f"""Extract the person's name, job title, and company from this LinkedIn search result.
-Return ONLY a JSON object with fields: name, title, company.
-If any field is unknown, use null.
+async def parse_prospect_from_result(title: str, snippet: str, url: str, role: str, location: str = "") -> dict:
+    """Use LLM to extract name, title, company, and enrichment data from a search result."""
+    prompt = f"""Extract prospect details from this LinkedIn search result.
+
+Return ONLY a JSON object with these exact fields:
+- name: Full person name (or null if unknown)
+- title: Exact job title (or null)
+- company: Company name (or null)
+- industry: One of: Retail, Food & Beverage, Manufacturing, Consumer Goods, Automotive (or null)
+- revenue: One of: $100M-200M, $200M-500M, $500M-1B, $1B-5B, $5B+, $100M-500M, $1B+ (or null)
+- employee_count: One of: 1-500, 500-2000, 2000-10000, 10000+ (or null)
+- notes: One sentence summarizing why this person is a relevant prospect for {role} in {location}
 
 Search result title: {title}
-Search result snippet: {snippet[:400]}
+Search result snippet: {snippet[:500]}
 Expected role: {role}
+Location context: {location}
 
-JSON:"""
+Rules:
+- If a field is unknown or ambiguous, use null.
+- For industry: infer from company description in snippet; default to null if unsure.
+- For revenue/employee_count: infer from company size signals (e.g., "Fortune 500", "global", "startup", "manufacturing plant"); use null rather than guess.
+- Notes should reference the source (LinkedIn/company site) and any specific pain point mentioned.
+
+JSON:
+"""
     
     messages = [
-        {"role": "system", "content": "You extract structured data from web search results. Return only valid JSON."},
+        {"role": "system", "content": "You extract structured prospect data from web search results. Return only valid JSON."},
         {"role": "user", "content": prompt},
     ]
     
@@ -156,114 +191,248 @@ JSON:"""
             "name": data.get("name"),
             "title": data.get("title") or role,
             "company": data.get("company") or "Unknown",
+            "industry": data.get("industry"),
+            "revenue": data.get("revenue"),
+            "employee_count": data.get("employee_count"),
+            "notes": data.get("notes") or f"Found via Brave Search for {role} in {location or 'target market'}; verify before outreach.",
             "url": url,
         }
     except Exception:
-        return {"name": None, "title": role, "company": "Unknown", "url": url}
+        return {
+            "name": None,
+            "title": role,
+            "company": "Unknown",
+            "industry": None,
+            "revenue": None,
+            "employee_count": None,
+            "notes": f"Found via Brave Search for {role} in {location or 'target market'}; verify before outreach.",
+            "url": url,
+        }
+async def brave_search(query: str, num: int = 10) -> List[dict]:
+    if not BRAVE_SEARCH_API_KEY:
+        return []
+    headers = {
+        "Accept": "application/json",
+        "X-Subscription-Token": BRAVE_SEARCH_API_KEY,
+    }
+    params = {"q": query, "count": num, "text_decorations": "false"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers=headers, params=params,
+            )
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            results = data.get("web", {}).get("results", [])
+            return [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("description", "")}
+                for r in results
+            ]
+    except Exception:
+        return []
 
-async def search_prospects(role: str, location: str) -> tuple[List[dict], str]:
-    """Search for prospects using DuckDuckGo with multiple query strategies."""
-    
+
+EXCLUDED_COMPANIES = {
+    "xpo logistics", "red classic logistics", "coyote logistics", "ups freight",
+    "fedex freight", "jb hunt", "schneider", "swift transportation",
+    "roland machinery", "cmac", "tema logistics", "estes express",
+    "old dominion", "yrc freight", "saia", "hl4", "tql", "randstad",
+    "lineage logistics", "amazon", "walmart", "target", "costco",
+    "home depot", "lowes", "kroger", "walgreens", "abbott laboratories",
+    "caterpillar", "kraft heinz", "ford motor", "general motors",
+    "mcdonalds", "boeing", "unitedhealth", "fidelity investments", "state farm",
+    "dhl supply chain", "exel", "zenith global", "sisu", "gates",
+    "neiman marcus", "target corporation", "the home depot", "7-eleven",
+    "mckesson", "cardinal health",
+}
+
+EXCLUDED_KEYWORDS = {
+    "3pl", "third party logistics", "freight", "truckload", "l tl",
+    "warehouse", "distribution center", "fulfillment center",
+    "refrigerated", "frozen", "foodservice", "grocery", "supermarket",
+    "retail store", "big-box", "wholesale", "bulk", "manufacturing",
+}
+
+def _is_excluded_company(company: str, location_city: str = "") -> bool:
+    """Check if a company should be excluded from results.
+    Dynamically excludes city+logistics combos like 'Phoenix Logistics' when searching Phoenix."""
+    if not company:
+        return False
+    norm = company.lower().strip()
+    if norm in ("unknown", "unknown - verify via linkedin"):
+        return False
+    if norm in EXCLUDED_COMPANIES:
+        return True
+    for kw in EXCLUDED_KEYWORDS:
+        if kw in norm:
+            return True
+    for excluded in EXCLUDED_COMPANIES:
+        if (norm.startswith(excluded + " ") or
+            norm.startswith(excluded + "'") or
+            norm.startswith(excluded + "-") or
+            norm.endswith(" " + excluded)):
+            return True
+    # Dynamic exclusion: if company starts with '[city] [logistics-suffix]', exclude
+    if location_city:
+        city_lower = location_city.lower().strip()
+        logistics_suffixes = [
+            "logistics", "logistics solutions", "logistics inc", "logistics group",
+            "transportation", "transit", "freight", "trucking", "supply chain",
+            "distribution", "delivery", "courier", "fulfillment", "3pl", "logistica",
+        ]
+        for suffix in logistics_suffixes:
+            if norm == f"{city_lower} {suffix}" or norm.startswith(f"{city_lower} {suffix} "):
+                return True
+            if norm.startswith(f"{city_lower} {suffix}") and (len(norm) == len(f"{city_lower} {suffix}") or norm[len(f"{city_lower} {suffix}")] in (" ", "-", "&")):
+                return True
+    return False
+
+
+def _format_location_for_query(location: str) -> str:
+    """Format location string into a precise search query format.
+    Converts 'Phoenix' -> 'Phoenix, AZ', 'Greater Phoenix Area' -> 'Phoenix, AZ'
+    Keeps full format if already contains state abbreviation or comma."""
+    if not location:
+        return ""
+    # Normalize whitespace
+    loc = " ".join(location.strip().split())
+    # Check if already has state (pattern: city, ST or city, state name)
+    import re
+    if re.search(r',\s*([A-Z]{2}$|[A-Za-z]+$)', loc):
+        return loc  # already formatted
+    # If it's a major metro area name, map to canonical city, state
+    metro_map = {
+        "greater phoenix area": "Phoenix, AZ",
+        "phoenix metro": "Phoenix, AZ",
+        "phoenix metropolitan": "Phoenix, AZ",
+        "dfw": "Dallas-Fort Worth, TX",
+        "dallas fort worth": "Dallas-Fort Worth, TX",
+        "dallas/ft worth": "Dallas-Fort Worth, TX",
+        "nyc": "New York, NY",
+        "new york city": "New York, NY",
+        "los angeles": "Los Angeles, CA",
+        "la": "Los Angeles, CA",
+        "san francisco": "San Francisco, CA",
+        "sf": "San Francisco, CA",
+        "chicago": "Chicago, IL",
+        "boston": "Boston, MA",
+        "seattle": "Seattle, WA",
+        "atlanta": "Atlanta, GA",
+        "denver": "Denver, CO",
+        "miami": "Miami, FL",
+        "houston": "Houston, TX",
+        "philadelphia": "Philadelphia, PA",
+    }
+    normalized = loc.lower()
+    if normalized in metro_map:
+        return metro_map[normalized]
+    # Default: assume city only, add common state abbreviation or keep as-is
+    # For ambiguous cities without state, we keep original but warn via query structure
+    return loc
+
+async def search_prospects(role: str, location: str, count: int = 2, industry: Optional[str] = None) -> tuple[List[dict], str]:
+    """Find prospects using Brave Search results and extract person/company details."""
+    # Normalize and format location for better search precision
+    formatted_location = _format_location_for_query(location)
+    location_quoted = f'"{formatted_location}"' if formatted_location else ""
+    role_quoted = f'"{role}"' if role else ""
+    industry_part = f' "{industry}"' if industry else ""
+
+    # Build queries with quoted terms to force phrase matching
+    # Prioritize LinkedIn site search with exact role + location
     queries = [
-        # Try LinkedIn first
-        f'site:linkedin.com/in "{role}" "{location}"',
-        f'site:linkedin.com/in "{role}" {location}',
-        # Fallback: broader web search
-        f'"{role}" "{location}" profile',
-        f'"{role}" {location} company',
-        f'"{role}" "{location}" directory',
+        # Primary: LinkedIn profiles with exact title and location
+        f'site:linkedin.com/in {role_quoted} {location_quoted}'.strip(),
+        # Secondary: LinkedIn with industry
+        f'site:linkedin.com/in {role_quoted} {location_quoted}{industry_part}'.strip(),
+        # Tertiary: Broad web with quotes
+        f'{role_quoted} {location_quoted} LinkedIn profile'.strip(),
+        # Quaternary: Executive focus
+        f'{role_quoted} {location_quoted} executive'.strip(),
     ]
 
-    all_results = []
-    seen_urls = set()
-    search_status = ""
-
-    for i, query in enumerate(queries):
-        # Stagger searches to avoid rate limits
-        if i > 0:
-            await asyncio.sleep(1.5)
-
-        try:
-            results = await duckduckgo_search(query, limit=6)
-            for r in results:
-                url = r.get("url", "")
-                title = r.get("title", "")
-
-                # Skip job listings, company pages, and bad domains
-                bad_paths = ["/jobs/", "/company/", "/pub/"]
-                if any(bp in url for bp in bad_paths):
-                    continue
-                if url in seen_urls:
-                    continue
-
-                # Skip aggregate/directory pages
-                clean_check = title.replace("| LinkedIn", "").strip()
-                if clean_check.count(" at ") > 1:
-                    continue
-                if title.count("|") > 2:
-                    continue
-                if clean_check.count("-") >= 3 and "..." in clean_check:
-                    continue
-
-                seen_urls.add(url)
-                all_results.append(r)
-
-            # If we have enough results, stop searching
-            if len(all_results) >= 6:
-                break
-
-        except Exception as e:
-            search_status = f"Search error: {str(e)[:100]}"
-            continue
-
-    if not all_results:
-        return [], search_status or "No search results returned. The search service may be temporarily unavailable."
-
     prospects = []
-    for r in all_results[:10]:
-        parsed = await parse_prospect_from_result(r["title"], r.get("snippet", ""), r["url"], role)
-        if parsed["name"]:
-            # Clean up name
-            parsed["name"] = re.sub(r',?\s*(MBA|CPA|P\.E\.|PhD|MD|JD|CFA|CSCP|PMP).*', '', parsed["name"], flags=re.IGNORECASE).strip()
+    seen = set()
 
-            # Fallback: targeted search for company if still unknown
-            if not parsed["company"] or parsed["company"] == "Unknown":
-                await asyncio.sleep(1)
-                parsed["company"] = await _search_company_for_prospect(parsed["name"], parsed["title"])
+    for query in queries:
+        brave_results = await brave_search(query, num=max(count * 4, 8))
+        for result in brave_results:
+            title = result.get("title", "")
+            snippet = result.get("snippet", "")
+            url = result.get("url", "")
+            if not title or url in seen:
+                continue
+            if any(bad in url for bad in ("/jobs/", "/company/", "/school/", "/learning/")):
+                continue
+            seen.add(url)
+
+            parsed = await parse_prospect_from_result(title, snippet, url, role, location)
+            company = parsed.get("company") or "Unknown"
+            name = parsed.get("name")
+            # Skip if contact name contains "Unknown"
+            if name and "unknown" in name.lower():
+                continue
+
+            # Extract city for dynamic company exclusion
+            city_for_exclusion = formatted_location.split(",")[0] if formatted_location else (location.split(",")[0] if location else "")
+            if _is_excluded_company(company, city_for_exclusion):
+                continue
+            if not name:
+                continue
 
             prospects.append({
-                "name": parsed["name"],
-                "title": parsed["title"],
-                "company": parsed["company"],
+                "name": name,
+                "title": parsed.get("title") or role,
+                "company": company,
+                "industry": parsed.get("industry"),
+                "revenue": parsed.get("revenue"),
+                "employee_count": parsed.get("employee_count"),
                 "source": "Web Research",
-                "notes": f"Found via web search for {role} in {location}",
-                "url": parsed["url"],
+                "notes": parsed.get("notes") or f"Found via Brave Search for {role} in {location or 'target market'}; verify before outreach.",
+                "url": parsed.get("url") or url,
             })
 
-    return prospects, ""
+            if len(prospects) >= count:
+                return prospects, ""
 
-async def generate_prospects_via_llm(role: str, location: str, industry: Optional[str] = None) -> List[dict]:
-    """When web search fails, use the LLM to suggest realistic prospects."""
-    prompt = f"""You are a sales research assistant. Suggest 5-8 realistic prospects for a {role} in {location}{f' in the {industry} industry' if industry else ''}.
+    return [], "Brave Search did not return usable person results."
+
+def _has_known_name(name: str) -> bool:
+    if not name:
+        return False
+    return "unknown" not in name.lower()
+
+async def generate_prospects_via_llm(role: str, location: str, industry: Optional[str] = None, count: int = 2) -> List[dict]:
+    """When web search fails, use the LLM to suggest realistic prospects with enrichment data."""
+    prompt = f"""You are a sales research assistant. Suggest exactly {count} realistic prospects for a {role} in {location}{f' in the {industry} industry' if industry else ''}.
 
 Return ONLY a JSON array of objects with these exact fields:
-- "name": Full name (use real, publicly known names ONLY; if unknown, use "Unknown - verify via LinkedIn")
+- "name": Full name. Do not use "Unknown", placeholders, initials-only names, or "verify via LinkedIn".
 - "title": Exact job title
 - "company": Company name (use real companies with operations in {location})
-- "notes": One sentence about why this is a good prospect
+- "industry": One of: Retail, Food & Beverage, Manufacturing, Consumer Goods, Automotive (or null if unsure)
+- "revenue": One of: $100M-200M, $200M-500M, $500M-1B, $1B-5B, $5B+, $100M-500M, $1B+ (or null if unsure)
+- "employee_count": One of: 1-500, 500-2000, 2000-10000, 10000+ (or null if unsure)
+- "notes": One sentence about why this is a good prospect, referencing company context
 
 Requirements:
 - Use REAL company names that operate in {location}
-- Use REAL person names ONLY if you are confident they hold this role at this company; otherwise use "Unknown - verify via LinkedIn"
+- Use REAL person names ONLY if you are confident they hold this role at this company
+- If you cannot provide exactly {count} named people, return an empty JSON array []
 - Target mid-market to large private companies ($100M-$5B revenue), NOT Fortune 50 megacorps
 - Avoid these companies: McDonald's, Walmart, Amazon, Target, Costco, Boeing, Walgreens, Abbott, Caterpillar, Kraft Heinz, Ford, GM, Apple, Google, Microsoft, Coca-Cola, PepsiCo, Nike, UPS, FedEx, J.B. Hunt, C.H. Robinson, Amazon, Kroger, Albertsons, Publix
 - Focus on regional distributors, manufacturers, private CPG brands, logistics companies, food producers, and industrial suppliers
-- Return ONLY valid JSON, no markdown, no explanations
+- For industry: pick from the list above based on company domain; null if uncertain
+- For revenue/employee_count: infer from company size signals (public filings, known scale, number of locations); use null rather than guess
+- Return ONLY valid JSON array, no markdown, no explanations
 
-JSON array:"""
+JSON array:
+"""
 
     messages = [
-        {"role": "system", "content": "You generate realistic sales prospect data. Return only valid JSON arrays."},
+        {"role": "system", "content": "You generate realistic sales prospect data with enrichment fields. Return only valid JSON arrays."},
         {"role": "user", "content": prompt},
     ]
 
@@ -277,16 +446,19 @@ JSON array:"""
 
         prospects = []
         for item in data:
-            if isinstance(item, dict) and item.get("name") and item.get("company"):
+            if isinstance(item, dict) and _has_known_name(item.get("name", "")) and item.get("company"):
                 prospects.append({
                     "name": item["name"],
                     "title": item.get("title", role),
                     "company": item["company"],
-                    "source": "AI Suggested",
-                    "notes": item.get("notes", f"Suggested {role} prospect in {location}"),
+                    "industry": item.get("industry"),
+                    "revenue": item.get("revenue"),
+                    "employee_count": item.get("employee_count"),
+                    "source": "Web Research",
+                    "notes": item.get("notes") or f"Suggested {role} prospect in {location}",
                     "url": "",
                 })
-        return prospects
+        return prospects[:count]
     except Exception:
         return []
 
@@ -340,38 +512,57 @@ Company:"""
     return "Unknown"
 
 async def save_prospects_to_notion(prospects: List[dict]) -> int:
-    """Save prospects to Notion database, skipping duplicates by company + contact name, and by company alone."""
-    # Fetch existing prospects for deduplication
-    existing_set = set()      # company|contact
-    existing_companies = set()  # company only
+    """Save prospects to Notion database, skipping duplicates based on normalized company and contact name.
+    Skips prospects with contact name containing 'Unknown'. Does not overwrite existing records."""
+    # Build deduplication sets from existing prospects
+    existing_norm_companies = set()          # all normalized company names present
+    existing_company_unknown = set()         # normalized companies that have at least one unknown contact
+    existing_known_contacts = set()          # set of (norm_company, norm_contact) for known contacts
+
     try:
         existing_pages = await query_database(PROSPECTS_DB_ID)
         for page in existing_pages:
             props = page.get("properties", {})
-            company = ""
-            contact = ""
+            company_raw = ""
+            contact_raw = ""
             if props.get("Company", {}).get("title"):
-                company = props["Company"]["title"][0].get("plain_text", "")
+                company_raw = props["Company"]["title"][0].get("plain_text", "")
             if props.get("Contact Name", {}).get("rich_text"):
-                contact = props["Contact Name"]["rich_text"][0].get("plain_text", "")
-            if company:
-                existing_companies.add(company.lower().strip())
-                if contact:
-                    existing_set.add(f"{company.lower().strip()}|{contact.lower().strip()}")
+                contact_raw = props["Contact Name"]["rich_text"][0].get("plain_text", "")
+            if company_raw:
+                norm_company = normalize_company_name(company_raw)
+                if norm_company:
+                    existing_norm_companies.add(norm_company)
+                    norm_contact = normalize_contact_name(contact_raw) if contact_raw else ""
+                    if not norm_contact or "unknown" in norm_contact:
+                        existing_company_unknown.add(norm_company)
+                    else:
+                        existing_known_contacts.add((norm_company, norm_contact))
     except Exception:
         pass
 
     saved = 0
     for p in prospects:
-        company_norm = p['company'].lower().strip()
-        name_norm = p['name'].lower().strip()
-        # Skip if this company already exists (regardless of contact)
-        if company_norm in existing_companies:
+        company_raw = p.get("company") or ""
+        name_raw = p.get("name") or ""
+        norm_company = normalize_company_name(company_raw)
+        norm_contact = normalize_contact_name(name_raw) if name_raw else ""
+
+        # Skip if contact name is missing or contains 'unknown'
+        if not norm_contact or "unknown" in norm_contact:
             continue
-        # Skip if exact company+contact already exists
-        key = f"{company_norm}|{name_norm}"
-        if key in existing_set:
-            continue
+
+        # If the company is entirely new, safe to create
+        if norm_company not in existing_norm_companies:
+            pass
+        else:
+            # Company exists — apply conflict rules
+            if norm_company in existing_company_unknown:
+                continue
+            if (norm_company, norm_contact) in existing_known_contacts:
+                continue
+            # else: different known contact, no unknowns — allow
+
         try:
             await create_page(
                 PROSPECTS_DB_ID,
@@ -381,12 +572,16 @@ async def save_prospects_to_notion(prospects: List[dict]) -> int:
                     "Contact Title": {"rich_text": [{"text": {"content": p["title"]}}]},
                     "Status": {"select": {"name": "New Lead"}},
                     "Source": {"select": {"name": p["source"]}},
+                    "Industry": {"select": {"name": p["industry"]}} if p.get("industry") else {"select": None},
+                    "Revenue": {"select": {"name": p["revenue"]}} if p.get("revenue") else {"select": None},
+                    "Employee Count": {"select": {"name": p["employee_count"]}} if p.get("employee_count") else {"select": None},
                     "Research Notes": {"rich_text": [{"text": {"content": p["notes"]}}]},
-                    "Website": {"url": p["url"] if p["url"].startswith("http") else None},
+                    "Website": {"url": p["url"]} if p.get("url") and isinstance(p["url"], str) and p["url"].startswith("http") else None,
                 }
             )
-            existing_set.add(key)
-            existing_companies.add(company_norm)
+            # Update in-memory sets to prevent duplicates within the same batch
+            existing_norm_companies.add(norm_company)
+            existing_known_contacts.add((norm_company, norm_contact))
             saved += 1
         except Exception:
             continue
@@ -394,7 +589,10 @@ async def save_prospects_to_notion(prospects: List[dict]) -> int:
 
 @router.post("/agent/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    user_message = request.messages[-1].content if request.messages else ""
+    request_messages = request.messages or []
+    user_message = request.message or (request_messages[-1].content if request_messages else "")
+    if not user_message:
+        raise HTTPException(status_code=400, detail="Message is required")
     
     # Check if this is a prospecting request
     params = await extract_prospecting_params(user_message)
@@ -402,25 +600,30 @@ async def chat(request: ChatRequest):
     if params.get("intent") == "prospecting" and params.get("role") and params.get("location"):
         role = params["role"]
         location = params["location"]
+        count = params.get("count", 2)
 
-        # Search for prospects (DDGS disabled: threads block uvicorn event loop)
-        prospects, search_error = [], "Web search disabled (DDGS blocks event loop)"
+        prospects, search_error = await search_prospects(
+            role,
+            location,
+            count,
+            params.get("industry"),
+        )
 
         if search_error and not prospects:
             # Use LLM fallback for realistic suggestions
-            llm_prospects = await generate_prospects_via_llm(role, location, params.get("industry"))
+            llm_prospects = await generate_prospects_via_llm(role, location, params.get("industry"), count)
 
             if llm_prospects:
                 saved_count = await save_prospects_to_notion(llm_prospects)
 
                 prospect_list = "\n".join([
                     f"- **{p['name']}** — {p['title']} at {p['company']}"
-                    for p in llm_prospects[:5]
+                    for p in llm_prospects[:count]
                 ])
 
                 response_text = (
-                    f"Web search is temporarily limited, so I used my knowledge to suggest {len(llm_prospects)} "
-                    f"{role}s in {location}. Saved {saved_count} to your CRM.\n\n"
+                    f"{search_error} I used my knowledge to suggest {len(llm_prospects)} "
+                    f"{role} in {location}. Saved {saved_count} to your CRM.\n\n"
                     f"Top suggestions (verify before reaching out):\n{prospect_list}\n\n"
                     f"Refresh your Prospects page to see them."
                 )
@@ -432,7 +635,7 @@ async def chat(request: ChatRequest):
                 )
 
             return ChatResponse(
-                response=f"I tried searching for {role}s in {location}, but hit an issue: {search_error}. Try again in a moment, or ask about your existing pipeline instead.",
+                response=f"I searched for {role} in {location}, but could not find {count} named prospects. I did not save unnamed or placeholder contacts. Try a broader title, nearby metro area, or a specific industry.",
                 action="prospecting",
                 data={"prospects_found": 0, "error": search_error}
             )
@@ -442,11 +645,11 @@ async def chat(request: ChatRequest):
 
             prospect_list = "\n".join([
                 f"- **{p['name']}** — {p['title']} at {p['company']}"
-                for p in prospects[:5]
+                for p in prospects[:count]
             ])
 
             response_text = (
-                f"Found {len(prospects)} {role}s in {location}. "
+                f"Found {len(prospects)} {role} in {location}. "
                 f"Saved {saved_count} to your CRM.\n\n"
                 f"Top results:\n{prospect_list}\n\n"
                 f"Refresh your Prospects page to see them."
@@ -459,15 +662,17 @@ async def chat(request: ChatRequest):
             )
         else:
             return ChatResponse(
-                response=f"I searched for {role}s in {location} but didn't find any results. Try a different role, city, or industry.",
+                response=f"I searched for {role} in {location} but didn't find any results. Try a different role, city, or industry.",
                 action="prospecting",
                 data={"prospects_found": 0}
             )
     
     # General chat - use OpenRouter
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for msg in request.messages:
+    for msg in request_messages:
         messages.append({"role": msg.role, "content": msg.content})
+    if not request_messages:
+        messages.append({"role": "user", "content": user_message})
     
     try:
         ai_response = await call_openrouter(messages)

@@ -4,3 +4,8 @@ backend/.venv/
 __pycache__/
 tsbuildinfo
 frontend/tsconfig.tsbuildinfo
+
+# Build artifacts - promotional video and assets
+frontend/output/
+frontend/remotion/
+frontend/public/remotion-assets/

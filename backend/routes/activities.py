@@ -96,6 +96,8 @@ async def create_activity(data: ActivityCreate):
             except Exception:
                 pass
 
+        from routes.dashboard import clear_dashboard_cache
+        clear_dashboard_cache()
         return Activity(**a)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -124,6 +126,8 @@ async def update_activity(page_id: str, data: ActivityUpdate):
             except Exception:
                 pass
 
+        from routes.dashboard import clear_dashboard_cache
+        clear_dashboard_cache()
         return Activity(**a)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -134,5 +138,7 @@ async def delete_activity(page_id: str):
     try:
         from notion import update_page
         await update_page(page_id, {"Archive": {"checkbox": True}})
+        from routes.dashboard import clear_dashboard_cache
+        clear_dashboard_cache()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

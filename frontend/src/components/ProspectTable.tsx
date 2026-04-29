@@ -9,13 +9,14 @@ import { Building2, Mail, Phone, Globe, DollarSign, Users } from 'lucide-react';
 interface ProspectTableProps {
   prospects: Prospect[];
   onStatusChange?: (id: string, status: string) => void;
+  pendingStatusChanges?: Record<string, string>;
 }
 
 const STATUS_OPTIONS = [
   'New Lead', 'Researched', 'Email Drafted', 'Sent', 'Replied', 'Meeting Set', 'Lost',
 ];
 
-export default function ProspectTable({ prospects, onStatusChange }: ProspectTableProps) {
+export default function ProspectTable({ prospects, onStatusChange, pendingStatusChanges = {} }: ProspectTableProps) {
   if (prospects.length === 0) {
     return (
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-12 text-center">
@@ -75,7 +76,11 @@ export default function ProspectTable({ prospects, onStatusChange }: ProspectTab
                     <select
                       value={prospect.status}
                       onChange={(e) => onStatusChange(prospect.id, e.target.value)}
-                      className="bg-transparent text-xs cursor-pointer focus:outline-none"
+                      className={`text-xs cursor-pointer focus:outline-none rounded-md px-2 py-1 ${
+                        pendingStatusChanges[prospect.id]
+                          ? 'bg-amber-500/10 text-amber-200 ring-1 ring-amber-400/40'
+                          : 'bg-transparent text-slate-200'
+                      }`}
                       onClick={(e) => e.stopPropagation()}
                     >
                       {STATUS_OPTIONS.map((s) => (
