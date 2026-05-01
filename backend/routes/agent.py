@@ -37,9 +37,9 @@ You have access to:
 - Notion API for CRM data
 - Real-time company research
 
-When prospecting, use Brave Search first. If results are sparse, supplement with your knowledge.
-Never invent personal details (emails, phones). Only suggest: name, title, company, LinkedIn hint.
-Always flag Food & Beverage / Frozen / Refrigerated companies as "verify via LinkedIn".
+When prospecting, use only search-backed results. Do not supplement sparse results with model knowledge.
+Never invent personal details, names, companies, emails, phones, or placeholder values.
+Only return prospects with a valid person name and a valid company from search-backed evidence.
 If you need more info, ask."""
 
 async def call_openrouter(messages: list, model: str = "anthropic/claude-sonnet-4") -> str:
@@ -190,7 +190,7 @@ JSON:
         return {
             "name": data.get("name"),
             "title": data.get("title") or role,
-            "company": data.get("company") or "Unknown",
+            "company": data.get("company"),
             "industry": data.get("industry"),
             "revenue": data.get("revenue"),
             "employee_count": data.get("employee_count"),
@@ -201,7 +201,7 @@ JSON:
         return {
             "name": None,
             "title": role,
-            "company": "Unknown",
+            "company": None,
             "industry": None,
             "revenue": None,
             "employee_count": None,
@@ -369,7 +369,7 @@ async def search_prospects(role: str, location: str, count: int = 2, industry: O
             seen.add(url)
 
             parsed = await parse_prospect_from_result(title, snippet, url, role, location)
-            company = parsed.get("company") or "Unknown"
+            company = parsed.get("company")
             name = parsed.get("name")
             # Skip if contact name contains "Unknown"
             if name and "unknown" in name.lower():
@@ -380,6 +380,8 @@ async def search_prospects(role: str, location: str, count: int = 2, industry: O
             if _is_excluded_company(company, city_for_exclusion):
                 continue
             if not name:
+                continue
+            if not _has_known_company(company):
                 continue
 
             prospects.append({
@@ -404,66 +406,31 @@ def _has_known_name(name: str) -> bool:
         return False
     return "unknown" not in name.lower()
 
-async def generate_prospects_via_llm(role: str, location: str, industry: Optional[str] = None, count: int = 2) -> List[dict]:
-    """When web search fails, use the LLM to suggest realistic prospects with enrichment data."""
-    prompt = f"""You are a sales research assistant. Suggest exactly {count} realistic prospects for a {role} in {location}{f' in the {industry} industry' if industry else ''}.
+def _has_known_company(company: str) -> bool:
+    if not company:
+        return False
+    normalized = company.strip().lower()
+    if not normalized:
+        return False
+    placeholder_values = {
+        "unknown",
+        "unknown - verify via linkedin",
+        "verify via linkedin",
+        "not found",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "linkedin",
+        "present",
+        "company",
+    }
+    if normalized in placeholder_values:
+        return False
+    return "unknown" not in normalized
 
-Return ONLY a JSON array of objects with these exact fields:
-- "name": Full name. Do not use "Unknown", placeholders, initials-only names, or "verify via LinkedIn".
-- "title": Exact job title
-- "company": Company name (use real companies with operations in {location})
-- "industry": One of: Retail, Food & Beverage, Manufacturing, Consumer Goods, Automotive (or null if unsure)
-- "revenue": One of: $100M-200M, $200M-500M, $500M-1B, $1B-5B, $5B+, $100M-500M, $1B+ (or null if unsure)
-- "employee_count": One of: 1-500, 500-2000, 2000-10000, 10000+ (or null if unsure)
-- "notes": One sentence about why this is a good prospect, referencing company context
-
-Requirements:
-- Use REAL company names that operate in {location}
-- Use REAL person names ONLY if you are confident they hold this role at this company
-- If you cannot provide exactly {count} named people, return an empty JSON array []
-- Target mid-market to large private companies ($100M-$5B revenue), NOT Fortune 50 megacorps
-- Avoid these companies: McDonald's, Walmart, Amazon, Target, Costco, Boeing, Walgreens, Abbott, Caterpillar, Kraft Heinz, Ford, GM, Apple, Google, Microsoft, Coca-Cola, PepsiCo, Nike, UPS, FedEx, J.B. Hunt, C.H. Robinson, Amazon, Kroger, Albertsons, Publix
-- Focus on regional distributors, manufacturers, private CPG brands, logistics companies, food producers, and industrial suppliers
-- For industry: pick from the list above based on company domain; null if uncertain
-- For revenue/employee_count: infer from company size signals (public filings, known scale, number of locations); use null rather than guess
-- Return ONLY valid JSON array, no markdown, no explanations
-
-JSON array:
-"""
-
-    messages = [
-        {"role": "system", "content": "You generate realistic sales prospect data with enrichment fields. Return only valid JSON arrays."},
-        {"role": "user", "content": prompt},
-    ]
-
-    try:
-        raw = await call_openrouter(messages, model="openai/gpt-4o-mini")
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
-
-        prospects = []
-        for item in data:
-            if isinstance(item, dict) and _has_known_name(item.get("name", "")) and item.get("company"):
-                prospects.append({
-                    "name": item["name"],
-                    "title": item.get("title", role),
-                    "company": item["company"],
-                    "industry": item.get("industry"),
-                    "revenue": item.get("revenue"),
-                    "employee_count": item.get("employee_count"),
-                    "source": "Web Research",
-                    "notes": item.get("notes") or f"Suggested {role} prospect in {location}",
-                    "url": "",
-                })
-        return prospects[:count]
-    except Exception:
-        return []
-
-async def _search_company_for_prospect(name: str, title: str) -> str:
-    """Do a targeted search to find company for a prospect when it's unknown."""
+async def _search_company_for_prospect(name: str, title: str) -> Optional[str]:
+    """Do a targeted search to find company for a prospect when the company is missing."""
     queries = [
         f'"{name}" "{title}" company',
         f'"{name}" "{title}" LinkedIn',
@@ -485,7 +452,7 @@ async def _search_company_for_prospect(name: str, title: str) -> str:
                 
                 # Use LLM to extract company from this result
                 prompt = f"""Extract the company name for this person from the search result.
-Return ONLY the company name, or "Unknown" if not found.
+Return ONLY the company name, or an empty string if not found.
 
 Person: {name}
 Title: {title}
@@ -495,25 +462,25 @@ Search result snippet: {snippet[:300]}
 Company:"""
                 
                 messages = [
-                    {"role": "system", "content": "You extract company names from web search results. Return only the company name or 'Unknown'."},
+                    {"role": "system", "content": "You extract company names from web search results. Return only a real company name or an empty string."},
                     {"role": "user", "content": prompt},
                 ]
                 
                 try:
                     raw = await call_openrouter(messages, model="openai/gpt-4o-mini")
                     company = raw.strip().strip('"').strip("'")
-                    if company and company.lower() not in ("unknown", "linkedin", "present", "not found", "null"):
+                    if _has_known_company(company):
                         return company
                 except Exception:
                     continue
         except Exception:
             continue
     
-    return "Unknown"
+    return None
 
 async def save_prospects_to_notion(prospects: List[dict]) -> int:
     """Save prospects to Notion database, skipping duplicates based on normalized company and contact name.
-    Skips prospects with contact name containing 'Unknown'. Does not overwrite existing records."""
+    Skips prospects with contact name or company containing placeholder values. Does not overwrite existing records."""
     # Build deduplication sets from existing prospects
     existing_norm_companies = set()          # all normalized company names present
     existing_company_unknown = set()         # normalized companies that have at least one unknown contact
@@ -550,6 +517,10 @@ async def save_prospects_to_notion(prospects: List[dict]) -> int:
 
         # Skip if contact name is missing or contains 'unknown'
         if not norm_contact or "unknown" in norm_contact:
+            continue
+
+        # Skip if company is missing or a placeholder
+        if not _has_known_company(company_raw):
             continue
 
         # If the company is entirely new, safe to create
@@ -600,7 +571,11 @@ async def chat(request: ChatRequest):
     if params.get("intent") == "prospecting" and params.get("role") and params.get("location"):
         role = params["role"]
         location = params["location"]
-        count = params.get("count", 2)
+        try:
+            requested_count = int(params.get("count", 2))
+        except (TypeError, ValueError):
+            requested_count = 2
+        count = max(1, min(requested_count, 3))
 
         prospects, search_error = await search_prospects(
             role,
@@ -608,34 +583,14 @@ async def chat(request: ChatRequest):
             count,
             params.get("industry"),
         )
+        prospects = [
+            p for p in prospects[:count]
+            if _has_known_name(p.get("name", "")) and _has_known_company(p.get("company", ""))
+        ]
 
         if search_error and not prospects:
-            # Use LLM fallback for realistic suggestions
-            llm_prospects = await generate_prospects_via_llm(role, location, params.get("industry"), count)
-
-            if llm_prospects:
-                saved_count = await save_prospects_to_notion(llm_prospects)
-
-                prospect_list = "\n".join([
-                    f"- **{p['name']}** — {p['title']} at {p['company']}"
-                    for p in llm_prospects[:count]
-                ])
-
-                response_text = (
-                    f"{search_error} I used my knowledge to suggest {len(llm_prospects)} "
-                    f"{role} in {location}. Saved {saved_count} to your CRM.\n\n"
-                    f"Top suggestions (verify before reaching out):\n{prospect_list}\n\n"
-                    f"Refresh your Prospects page to see them."
-                )
-
-                return ChatResponse(
-                    response=response_text,
-                    action="prospecting",
-                    data={"prospects_found": len(llm_prospects), "saved": saved_count, "source": "llm_fallback"}
-                )
-
             return ChatResponse(
-                response=f"I searched for {role} in {location}, but could not find {count} named prospects. I did not save unnamed or placeholder contacts. Try a broader title, nearby metro area, or a specific industry.",
+                response=f"I searched for {role} in {location}, but could not find {count} prospects with both a valid name and valid company. I did not save fake, unnamed, or placeholder records. Try a broader title, nearby metro area, or a specific industry.",
                 action="prospecting",
                 data={"prospects_found": 0, "error": search_error}
             )

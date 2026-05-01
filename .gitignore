@@ -4,6 +4,11 @@ backend/.venv/
 __pycache__/
 tsbuildinfo
 frontend/tsconfig.tsbuildinfo
+.DS_Store
+**/.DS_Store
+.deck-tools/
+output/
+create-crm-overview-deck.js
 
 # Build artifacts - promotional video and assets
 frontend/output/
