@@ -67,7 +67,6 @@ export OPENROUTER_API_KEY="sk-or-xxx"
 python main.py
 ```
 
-Runs on http://localhost:8000
 
 ### Frontend
 
@@ -76,8 +75,6 @@ cd frontend
 npm install
 npm run dev
 ```
-
-Runs on http://localhost:3000
 
 ## Environment Variables
 
